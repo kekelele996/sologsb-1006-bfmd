@@ -36,6 +36,14 @@ export interface Announcement {
   createdAt: string
 }
 
+export interface CueRevision {
+  id: string
+  text: string
+  reason: string
+  operator: string
+  createdAt: number
+}
+
 export interface Cue {
   id: string
   speakerId: string
@@ -48,6 +56,7 @@ export interface Cue {
   duplicateOf: string | null
   followupText: string
   tags: string[]
+  revisions: CueRevision[]
 }
 
 export interface Reminder {
@@ -70,5 +79,6 @@ export interface DeskState {
   fontScale: number
   online: boolean
   liveSimulation: boolean
+  operator: string
   updatedAt: string
 }

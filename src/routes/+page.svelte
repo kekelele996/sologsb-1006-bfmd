@@ -3,9 +3,9 @@
   import Button from 'flowbite-svelte/Button.svelte'
   import {
     acknowledgeReminder, addAnnouncement, addSession, addSpeaker, addTerm, canRedo, canUndo, clearDuplicate,
-    deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk, sendReminder, setActiveCue,
-    setCueStatus, setFontScale, setLiveSimulation, setOnline, speakerName, termTarget, undoDesk, updateCue,
-    updateSession, updateSpeaker, updateTerm
+    correctCue, deleteCue, desk, getDelay, ingestCue, latestRevision, moveCue, publishAnnouncement, redoDesk,
+    revisionCount, sendReminder, setActiveCue, setCueStatus, setFontScale, setLiveSimulation, setOnline,
+    setOperator, speakerName, termTarget, undoDesk, updateCue, updateSession, updateSpeaker, updateTerm
   } from '$lib/store'
   import type { Announcement, Cue, Session, TabId, Term } from '$lib/types'
 
@@ -29,6 +29,12 @@
   let manualInput: HTMLTextAreaElement
   let simulationIndex = 0
   let showHelp = false
+  let correctingCue: Cue | null = null
+  let correctionText = ''
+  let correctionReason = ''
+  let correctionOperator = ''
+  let revisionIndex = 0
+  let draftText = ''
 
   $: currentSession = $desk.sessions.find(item => item.status === 'live') || $desk.sessions[0]
   $: activeCue = $desk.cues.find(item => item.id === $desk.activeCueId) || $desk.cues.at(-1)
@@ -39,6 +45,12 @@
   $: activeSpeaker = $desk.speakers.find(item => item.id === activeCue?.speakerId)
   $: activeTerms = $desk.terms.filter(item => item.speakerId === activeCue?.speakerId || activeCue?.tags.includes(item.target))
   $: unreadReminders = $desk.reminders.filter(item => !item.acknowledged)
+  $: dialogCue = correctingCue ? $desk.cues.find(item => item.id === correctingCue?.id) : null
+  // 选中未确认段落时直接编辑；已确认段落的正文不可直接改写，只能走“正文纠正”
+  $: if (activeCue && activeCue.status !== 'confirmed') draftText = activeCue.text
+  $: revisionCountTotal = dialogCue ? revisionCount(dialogCue) : 0
+  // 新增纠正版本后回到最后一版，保证连续纠正时看到的是当前正稿
+  $: if (dialogCue && revisionIndex > revisionCountTotal - 1) revisionIndex = Math.max(0, revisionCountTotal - 1)
 
   onMount(() => {
     if (typeof navigator !== 'undefined') setOnline(navigator.onLine)
@@ -84,6 +96,39 @@
     followup = ''
     flash('遗漏内容已补充并标记为待跟进。')
   }
+  function saveDraftEdit() {
+    if (!activeCue || activeCue.status === 'confirmed') return
+    const trimmed = draftText.trim()
+    if (!trimmed || trimmed === activeCue.text) return
+    updateCue(activeCue.id, { text: trimmed })
+    flash('未确认段落已直接更新，不生成纠正记录。')
+  }
+  function openCorrection(cue: Cue) {
+    if (cue.status !== 'confirmed') return
+    correctingCue = cue
+    correctionText = cue.text
+    correctionReason = ''
+    correctionOperator = $desk.operator
+    revisionIndex = Math.max(0, revisionCount(cue) - 1)
+  }
+  function closeCorrection() {
+    correctingCue = null
+    correctionText = ''
+    correctionReason = ''
+  }
+  function submitCorrection() {
+    if (!dialogCue) return
+    if (correctCue(dialogCue.id, correctionText, correctionReason, correctionOperator)) {
+      correctionReason = ''
+      revisionIndex = revisionCount($desk.cues.find(item => item.id === dialogCue.id) || dialogCue) - 1
+      flash('正文已纠正，舞台同一段已替换为最新正稿，旧稿保留在版本记录中。')
+    }
+  }
+  function useAsCorrectionBase() {
+    const revision = dialogCue?.revisions[revisionIndex]
+    if (!revision) return
+    correctionText = revision.text
+  }
   function submitManual() {
     if (!manualText.trim()) return
     ingestCue(manualText, { manual: true, speakerId: manualSpeakerId || activeCue?.speakerId })
@@ -126,6 +171,7 @@
     if (event.key === 'j' || event.key === 'ArrowDown') { event.preventDefault(); moveCue(1) }
     if (event.key === 'k' || event.key === 'ArrowUp') { event.preventDefault(); moveCue(-1) }
     if (event.key.toLowerCase() === 'c') { event.preventDefault(); confirmActive() }
+    if (event.key.toLowerCase() === 'x' && activeCue?.status === 'confirmed') { event.preventDefault(); openCorrection(activeCue) }
     if (event.key.toLowerCase() === 'n') { event.preventDefault(); manualInput?.focus(); flash('手工录入已获焦，输入后按 Ctrl + Enter 提交。') }
     if (event.key.toLowerCase() === 't' && activeTerms[0]) { event.preventDefault(); sendTermReminder(activeTerms[0].id) }
     if (event.key === '?') { event.preventDefault(); showHelp = true }
@@ -198,7 +244,15 @@
               {/each}
               {#each $desk.cues.filter(item => item.status === 'confirmed').slice(-2) as cue}
                 <div class="rounded-xl bg-white/10 p-3">
-                  <div class="mb-1 flex justify-between text-[10px] text-teal-200"><span>{speakerName($desk, cue.speakerId)}</span><span>{formatTime(cue.receivedAt)}</span></div>
+                  <div class="mb-1 flex items-center justify-between gap-2 text-[10px] text-teal-200">
+                    <span>{speakerName($desk, cue.speakerId)}</span>
+                    <span class="flex items-center gap-2">
+                      {#if revisionCount(cue) > 1}
+                        <span class="rounded-full bg-amber-500/90 px-2 py-0.5 font-black text-white">正稿 v{revisionCount(cue)} · {formatTime(latestRevision(cue)?.createdAt ?? cue.receivedAt)}</span>
+                      {/if}
+                      <span>{formatTime(cue.receivedAt)}</span>
+                    </span>
+                  </div>
                   <p class="text-base leading-relaxed lg:text-lg">{cue.text}</p>
                 </div>
               {/each}
@@ -226,6 +280,7 @@
                         <span class="rounded-md px-2 py-1 {cue.status === 'confirmed' ? 'bg-emerald-100 text-emerald-800' : cue.status === 'followup' ? 'bg-amber-100 text-amber-900' : 'bg-blue-100 text-blue-800'}">{statusLabel(cue.status)}</span>
                         {#if cue.offline}<span class="rounded-md bg-amber-100 px-2 py-1 text-amber-900">离线暂存</span>{/if}
                         {#if cue.manual}<span class="rounded-md bg-slate-100 px-2 py-1 text-slate-600">手工</span>{/if}
+                        {#if revisionCount(cue) > 1}<span class="rounded-md bg-amber-100 px-2 py-1 text-amber-900">已纠正 · v{revisionCount(cue)}</span>{/if}
                       </div>
                       <p class="text-sm leading-6 lg:text-base">{cue.text}</p>
                       {#if cue.duplicateOf}
@@ -235,6 +290,12 @@
                         </div>
                       {/if}
                       {#if cue.followupText}<p class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900"><strong>补译：</strong>{cue.followupText}</p>{/if}
+                      {#if cue.status === 'confirmed'}
+                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                          <button class="rounded-lg bg-amber-100 px-2.5 py-1 text-[11px] font-black text-amber-900 underline-offset-2 hover:bg-amber-200" on:click|stopPropagation={() => openCorrection(cue)}>正文纠正 <kbd class="ml-0.5 text-[10px]">X</kbd></button>
+                          {#if revisionCount(cue) > 1}<button class="text-[11px] font-bold text-teal-700 underline underline-offset-2" on:click|stopPropagation={() => openCorrection(cue)}>查看 {revisionCount(cue)} 个版本</button>{/if}
+                        </div>
+                      {/if}
                       <div class="mt-2 flex flex-wrap gap-1">{#each cue.tags as tag}<span class="rounded-full bg-teal-100 px-2 py-1 text-[10px] font-bold text-teal-800">{tag}</span>{/each}</div>
                     </div>
                   </div>
@@ -251,8 +312,30 @@
               <div class="flex gap-1"><button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="上一条" on:click={() => moveCue(-1)}>↑</button><button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="下一条" on:click={() => moveCue(1)}>↓</button></div>
             </div>
             {#if activeCue}
-              <div class="rounded-xl bg-slate-50 p-3"><p class="text-sm leading-6">{activeCue.text}</p><p class="mt-2 text-[10px] text-slate-500">快捷键：J / K 移动，C 确认，T 发送首条高优先术语提醒</p></div>
-              <div class="mt-3 grid grid-cols-2 gap-2"><Button color="green" on:click={confirmActive}>确认已传 <kbd class="ml-1 text-[10px]">C</kbd></Button><Button color="yellow" on:click={() => tab = 'offline'}>手工补充</Button></div>
+              {#if activeCue.status === 'confirmed'}
+                <div class="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                  <div class="mb-1 flex items-center justify-between text-[10px] font-black text-emerald-800">
+                    <span>舞台当前内容{revisionCount(activeCue) > 1 ? ` · 正稿 v${revisionCount(activeCue)}` : ''}</span>
+                    {#if revisionCount(activeCue) > 1}<span>{formatTime(latestRevision(activeCue)?.createdAt ?? activeCue.receivedAt)}</span>{/if}
+                  </div>
+                  <p class="text-sm leading-6">{activeCue.text}</p>
+                </div>
+                <div class="mt-3 grid grid-cols-2 gap-2">
+                  <Button color="yellow" on:click={() => openCorrection(activeCue)}>正文纠正 <kbd class="ml-1 text-[10px]">X</kbd></Button>
+                  <Button color="light" on:click={() => tab = 'offline'}>手工补充</Button>
+                </div>
+                {#if revisionCount(activeCue) > 1}
+                  <Button class="mt-2 w-full" size="sm" color="light" on:click={() => openCorrection(activeCue)}>查看版本记录（{revisionCount(activeCue)} 版）</Button>
+                {/if}
+                <p class="mt-2 text-[10px] text-slate-500">已确认段落如需改正，请发起“正文纠正”；舞台同一段会替换为最新正稿，旧稿保留在版本记录中。</p>
+              {:else}
+                <div class="rounded-xl bg-slate-50 p-3">
+                  <p class="text-[10px] font-black uppercase tracking-wider text-slate-500">原文（未确认，可直接编辑）</p>
+                  <textarea class="focus-ring mt-2 w-full rounded-lg border p-2 text-sm leading-6" rows="4" bind:value={draftText}></textarea>
+                  <Button class="mt-2 w-full" size="sm" color="light" disabled={!draftText.trim() || draftText.trim() === activeCue.text} on:click={saveDraftEdit}>保存直接编辑（不生成纠正记录）</Button>
+                </div>
+                <div class="mt-3 grid grid-cols-2 gap-2"><Button color="green" on:click={confirmActive}>确认已传 <kbd class="ml-1 text-[10px]">C</kbd></Button><Button color="yellow" on:click={() => tab = 'offline'}>手工补充</Button></div>
+              {/if}
               <label for="followup-input" class="mt-4 block text-[10px] font-black uppercase tracking-wider text-slate-500">遗漏补译</label>
               <textarea id="followup-input" class="focus-ring mt-2 w-full rounded-xl border p-3 text-sm" rows="3" bind:value={followup} placeholder="输入遗漏内容或修正术语…"></textarea>
               <Button class="mt-2 w-full" color="light" disabled={!followup.trim()} on:click={saveFollowup}>标记补充完成</Button>
@@ -378,12 +461,68 @@
   <footer class="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3 px-4 pb-6 text-[11px] text-slate-500 lg:px-6"><span>本机自动保存 · 最近更新 {new Date($desk.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span><span>后台准备内容与现场可见内容严格分离</span><div class="flex gap-2"><button class="font-bold underline disabled:opacity-40" disabled={!canUndo()} on:click={undoDesk}>撤销</button><button class="font-bold underline disabled:opacity-40" disabled={!canRedo()} on:click={redoDesk}>重做</button></div></footer>
 </div>
 
+{#if dialogCue}
+  <div class="fixed inset-0 z-[80] grid place-items-center bg-slate-950/60 p-4" role="presentation" on:click={closeCorrection} on:keydown={event => event.key === 'Escape' && closeCorrection()}>
+    <div class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="correction-title" on:click|stopPropagation on:keydown|stopPropagation>
+      <div class="flex items-start justify-between gap-3 border-b p-5">
+        <div>
+          <span class="text-[10px] font-black uppercase tracking-[.16em] text-amber-700">正文纠正 · 仅对已确认段落</span>
+          <h2 id="correction-title" class="mt-1 text-xl font-black">纠正已上屏内容</h2>
+          <p class="mt-1 text-xs text-slate-500">{speakerName($desk, dialogCue.speakerId)} · {formatTime(dialogCue.receivedAt)} · 确认后舞台同一段只显示最新正稿，旧稿保留在版本记录中。</p>
+        </div>
+        <button class="rounded-lg px-2 py-1 text-xl" aria-label="关闭" on:click={closeCorrection}>×</button>
+      </div>
+      <div class="grid gap-5 overflow-y-auto p-5 lg:grid-cols-2">
+        <div class="space-y-3">
+          <label class="block text-[10px] font-black uppercase tracking-wider text-slate-500" for="correction-text">正稿内容（确认后替换舞台显示）</label>
+          <textarea id="correction-text" class="focus-ring w-full rounded-xl border p-3 text-sm leading-7" rows="7" bind:value={correctionText}></textarea>
+          <label class="block text-[10px] font-black uppercase tracking-wider text-slate-500" for="correction-reason">纠正原因（口误 / 术语纠正等，必填）</label>
+          <textarea id="correction-reason" class="focus-ring w-full rounded-xl border p-3 text-sm" rows="2" bind:value={correctionReason} placeholder="例如：将“恢复力”更正为指定译法“韧性”"></textarea>
+          <label class="block text-[10px] font-black uppercase tracking-wider text-slate-500" for="correction-operator">操作人</label>
+          <input id="correction-operator" class="focus-ring w-full rounded-xl border p-3 text-sm" bind:value={correctionOperator} on:change={event => setOperator((event.target as HTMLInputElement).value)} placeholder="输入当前译员姓名" />
+          <div class="flex gap-2 pt-1">
+            <Button color="yellow" disabled={!correctionText.trim() || !correctionReason.trim() || correctionText.trim() === dialogCue.text} on:click={submitCorrection}>确认纠正并更新舞台</Button>
+            <Button color="light" on:click={closeCorrection}>关闭</Button>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">版本记录</span><h3 class="mt-0.5 font-black">逐版查看 · 共 {revisionCountTotal} 版</h3></div>
+            <div class="flex items-center gap-1">
+              <Button size="xs" color="light" disabled={revisionIndex === 0} on:click={() => revisionIndex -= 1}>← 上一版</Button>
+              <span class="px-1 text-xs font-black text-slate-600">{revisionIndex + 1}/{revisionCountTotal}</span>
+              <Button size="xs" color="light" disabled={revisionIndex >= revisionCountTotal - 1} on:click={() => revisionIndex += 1}>下一版 →</Button>
+            </div>
+          </div>
+          {#if dialogCue.revisions[revisionIndex]}
+            {@const revision = dialogCue.revisions[revisionIndex]}
+            <div class="mt-3 rounded-xl border bg-white p-3 {revisionIndex === revisionCountTotal - 1 ? 'border-emerald-300' : 'border-slate-200'}">
+              <div class="flex flex-wrap items-center gap-2 text-[10px] font-bold">
+                {#if revisionIndex === 0}<span class="rounded-md bg-slate-900 px-2 py-0.5 text-white">原稿</span>{:else}<span class="rounded-md bg-amber-100 px-2 py-0.5 text-amber-900">正稿 v{revisionIndex + 1}</span>{/if}
+                {#if revisionIndex === revisionCountTotal - 1}<span class="rounded-md bg-emerald-100 px-2 py-0.5 text-emerald-800">舞台当前显示</span>{/if}
+                <span class="text-slate-500">{new Date(revision.createdAt).toLocaleString('zh-CN', { hour12: false })}</span>
+                {#if revision.operator}<span class="rounded-md bg-slate-100 px-2 py-0.5 text-slate-600">操作人：{revision.operator}</span>{/if}
+              </div>
+              <p class="mt-2 whitespace-pre-wrap text-sm leading-7">{revision.text}</p>
+              {#if revision.reason}<p class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900"><strong>原因：</strong>{revision.reason}</p>{/if}
+              {#if revisionIndex < revisionCountTotal - 1}
+                <Button class="mt-2" size="xs" color="light" on:click={useAsCorrectionBase}>用此版内容作为下一次正稿基础</Button>
+              {/if}
+            </div>
+          {/if}
+          <p class="mt-3 text-[11px] leading-5 text-slate-500">连续纠正会继续追加版本；舞台始终只显示最后版本，原稿、每一版正稿、操作人与时间均可在此逐版回看。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showHelp}
   <div class="fixed inset-0 z-[80] grid place-items-center bg-slate-950/60 p-4" role="presentation" on:click={() => showHelp = false} on:keydown={event => event.key === 'Escape' && (showHelp = false)}>
     <div class="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="shortcut-title" on:click|stopPropagation on:keydown|stopPropagation>
       <div class="flex items-start justify-between"><div><span class="text-[10px] font-black uppercase tracking-[.16em] text-teal-700">Keyboard First</span><h2 id="shortcut-title" class="mt-1 text-xl font-black">键盘操作</h2></div><button class="rounded-lg px-2 py-1 text-xl" aria-label="关闭" on:click={() => showHelp = false}>×</button></div>
       <div class="mt-4 grid gap-2 sm:grid-cols-2">
-        {#each [['J / ↓','下一条队列'],['K / ↑','上一条队列'],['C','确认已传并前进'],['N','聚焦手工录入'],['T','发送当前高优先术语'],['+ / −','调整界面字号'],['Ctrl + Z','撤销'],['Ctrl + Shift + Z','重做']] as shortcut}
+        {#each [['J / ↓','下一条队列'],['K / ↑','上一条队列'],['C','确认已传并前进'],['X','对已确认段落正文纠正'],['N','聚焦手工录入'],['T','发送当前高优先术语'],['+ / −','调整界面字号'],['Ctrl + Z','撤销'],['Ctrl + Shift + Z','重做']] as shortcut}
           <div class="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2"><kbd class="rounded-md border bg-white px-2 py-1 text-xs font-black">{shortcut[0]}</kbd><span class="text-xs text-slate-600">{shortcut[1]}</span></div>
         {/each}
       </div>

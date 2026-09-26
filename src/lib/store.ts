@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store'
-import type { Announcement, Cue, CueStatus, DeskState, Reminder, Session, Speaker, Term } from './types'
+import type { Announcement, Cue, CueRevision, CueStatus, DeskState, Reminder, Session, Speaker, Term } from './types'
 
 const STORAGE_KEY = 'conference-cue-desk-v1'
 const speakers: Speaker[] = [
@@ -23,12 +23,16 @@ const terms: Term[] = [
 ]
 function initialCues(): Cue[] {
   const now = Date.now()
-  return [
+  const rows: Array<Omit<Cue, 'revisions'>> = [
     { id: 'cue-101', speakerId: 'sp-1', text: 'The urban heat island effect is not evenly distributed across a city.', receivedAt: now - 36000, status: 'confirmed', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['城市热岛'] },
     { id: 'cue-102', speakerId: 'sp-1', text: 'Neighborhoods with less tree canopy can be several degrees warmer at night.', receivedAt: now - 19000, status: 'confirmed', manual: false, offline: false, delaySeconds: 6, duplicateOf: null, followupText: '补译：“夜间温差可达数摄氏度。”', tags: ['树冠覆盖率'] },
     { id: 'cue-103', speakerId: 'sp-1', text: 'Our resilience strategy links cooling corridors with public health investments.', receivedAt: now - 9000, status: 'pending', manual: false, offline: false, delaySeconds: 11, duplicateOf: null, followupText: '', tags: ['韧性', '协同效益'] },
     { id: 'cue-104', speakerId: 'sp-1', text: 'That data also reveals health equity gaps between districts.', receivedAt: now - 2500, status: 'pending', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['健康公平'] }
   ]
+  return rows.map(row => ({ ...row, revisions: [originalRevision(row)] }))
+}
+function originalRevision(cue: { text: string; receivedAt: number }): CueRevision {
+  return { id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: cue.text, reason: '', operator: '', createdAt: cue.receivedAt }
 }
 function demoState(): DeskState {
   return {
@@ -37,16 +41,26 @@ function demoState(): DeskState {
       { id: 'ann-1', level: 'info', text: '十点整有消防联动测试，请提醒会场人员保持镇定。', visibleOnStage: false, createdAt: new Date().toISOString() },
       { id: 'ann-2', level: 'urgent', text: '请下一位发言人提前到侧台候场。', visibleOnStage: false, createdAt: new Date().toISOString() }
     ],
-    online: true, liveSimulation: true, updatedAt: new Date().toISOString()
+    online: true, liveSimulation: true, operator: '值班译员', updatedAt: new Date().toISOString()
   }
 }
 function clone<T>(value: T): T { return structuredClone(value) }
 function loadState(): DeskState {
-  if (typeof localStorage === 'undefined') return demoState()
+  const fallback = demoState()
+  if (typeof localStorage === 'undefined') return fallback
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? { ...demoState(), ...JSON.parse(saved), online: navigator.onLine } : demoState()
-  } catch { return demoState() }
+    if (!saved) return fallback
+    const merged: DeskState = { ...fallback, ...JSON.parse(saved), online: navigator.onLine }
+    if (typeof merged.operator !== 'string' || !merged.operator.trim()) merged.operator = '值班译员'
+    // 迁移旧数据：为每条段落补齐原始版本，确认时刻的上屏内容作为原稿存档
+    merged.cues.forEach(cue => {
+      if (!Array.isArray(cue.revisions) || !cue.revisions.length) {
+        cue.revisions = [originalRevision(cue)]
+      }
+    })
+    return merged
+  } catch { return fallback }
 }
 const history: DeskState[] = []
 const future: DeskState[] = []
@@ -132,13 +146,60 @@ export function ingestCue(text: string, options: { manual?: boolean; speakerId?:
     const cue: Cue = {
       id: `cue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, speakerId, text: trimmed, receivedAt,
       status: 'pending', manual: Boolean(options.manual), offline: !state.online, delaySeconds: Math.max(0, Math.round((Date.now() - receivedAt) / 1000)),
-      duplicateOf: duplicate?.id || null, followupText: '', tags: detectTerms(trimmed, state.terms)
+      duplicateOf: duplicate?.id || null, followupText: '', tags: detectTerms(trimmed, state.terms), revisions: []
     }
+    cue.revisions = [originalRevision(cue)]
     state.cues.push(cue); state.activeCueId = cue.id
   })
 }
 export function updateCue(id: string, patch: Partial<Cue>) { commit(state => { const cue = state.cues.find(item => item.id === id); if (cue) Object.assign(cue, patch) }) }
-export function setCueStatus(id: string, status: CueStatus) { commit(state => { const cue = state.cues.find(item => item.id === id); if (cue) cue.status = status }) }
+export function setCueStatus(id: string, status: CueStatus) {
+  commit(state => {
+    const cue = state.cues.find(item => item.id === id)
+    if (!cue) return
+    if (status === 'confirmed' && cue.status !== 'confirmed') {
+      // 首次确认上屏：以当时文本固定原稿；未确认阶段的直接编辑不生成纠正记录
+      cue.revisions = [{ ...originalRevision(cue) }]
+    }
+    cue.status = status
+  })
+}
+export function setOperator(name: string) {
+  const trimmed = name.trim()
+  if (!trimmed) return
+  commit(state => { state.operator = trimmed })
+}
+/**
+ * 正文纠正：仅允许从已确认段落发起。
+ * 舞台始终读取 cue.text（最新正稿），旧稿只保留在 revisions 中逐版可查；
+ * 同一内容连续纠正时继续追加版本，舞台只显示最后版本。
+ */
+export function correctCue(id: string, text: string, reason: string, operator: string): boolean {
+  const finalText = text.trim()
+  const finalReason = reason.trim()
+  if (!finalText || !finalReason) return false
+  let accepted = false
+  commit(state => {
+    const cue = state.cues.find(item => item.id === id)
+    if (!cue || cue.status !== 'confirmed') return
+    if (cue.revisions.at(-1)?.text === finalText) return
+    const revision: CueRevision = {
+      id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      text: finalText,
+      reason: finalReason,
+      operator: operator.trim() || state.operator,
+      createdAt: Date.now()
+    }
+    cue.revisions.push(revision)
+    cue.text = finalText
+    const actor = revision.operator.trim()
+    if (actor) state.operator = actor
+    accepted = true
+  })
+  return accepted
+}
+export function revisionCount(cue: Cue): number { return cue.revisions.length }
+export function latestRevision(cue: Cue): CueRevision | undefined { return cue.revisions.at(-1) }
 export function deleteCue(id: string) { commit(state => { state.cues = state.cues.filter(item => item.id !== id); if (state.activeCueId === id) state.activeCueId = state.cues.at(-1)?.id || '' }) }
 export function clearDuplicate(id: string) { commit(state => { const cue = state.cues.find(item => item.id === id); if (cue) cue.duplicateOf = null }) }
 export function sendReminder(termId: string, cueId: string) {
