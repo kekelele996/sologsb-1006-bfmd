@@ -36,6 +36,20 @@ export interface Announcement {
   createdAt: string
 }
 
+export interface Correction {
+  id: string
+  /** 该次纠正之前舞台上显示的内容 */
+  fromText: string
+  /** 译员提交的正稿 */
+  toText: string
+  /** 纠正原因（口误 / 术语纠正等） */
+  reason: string
+  /** 操作人 */
+  operator: string
+  /** 操作时间 */
+  createdAt: number
+}
+
 export interface Cue {
   id: string
   speakerId: string
@@ -48,6 +62,8 @@ export interface Cue {
   duplicateOf: string | null
   followupText: string
   tags: string[]
+  /** 已确认段落的正文纠正记录，按时间顺序逐版保留；舞台只显示最后一版 */
+  corrections: Correction[]
 }
 
 export interface Reminder {
@@ -68,6 +84,8 @@ export interface DeskState {
   reminders: Reminder[]
   activeCueId: string
   fontScale: number
+  /** 当前操作人，记录在纠正版本中 */
+  operator: string
   online: boolean
   liveSimulation: boolean
   updatedAt: string

@@ -3,9 +3,9 @@
   import Button from 'flowbite-svelte/Button.svelte'
   import {
     acknowledgeReminder, addAnnouncement, addSession, addSpeaker, addTerm, canRedo, canUndo, clearDuplicate,
-    deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk, sendReminder, setActiveCue,
-    setCueStatus, setFontScale, setLiveSimulation, setOnline, speakerName, termTarget, undoDesk, updateCue,
-    updateSession, updateSpeaker, updateTerm
+    correctCue, cueVersions, deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk,
+    sendReminder, setActiveCue, setCueStatus, setFontScale, setLiveSimulation, setOnline, setOperator,
+    speakerName, termTarget, undoDesk, updateCue, updateSession, updateSpeaker, updateTerm
   } from '$lib/store'
   import type { Announcement, Cue, Session, TabId, Term } from '$lib/types'
 
@@ -20,7 +20,6 @@
   let now = Date.now()
   let manualText = ''
   let manualSpeakerId = ''
-  let cueNote = ''
   let followup = ''
   let reminderTermId = ''
   let notice = ''
@@ -29,6 +28,13 @@
   let manualInput: HTMLTextAreaElement
   let simulationIndex = 0
   let showHelp = false
+  let operatorDraft = $desk.operator
+  let correctionForId: string | null = null
+  let correctionText = ''
+  let correctionReason = ''
+  let historyOpenIds: string[] = []
+  let editingId: string | null = null
+  let editingText = ''
 
   $: currentSession = $desk.sessions.find(item => item.status === 'live') || $desk.sessions[0]
   $: activeCue = $desk.cues.find(item => item.id === $desk.activeCueId) || $desk.cues.at(-1)
@@ -68,9 +74,53 @@
     window.setTimeout(() => { if (notice === message) notice = '' }, 2800)
   }
   function selectCue(cue: Cue) {
+    if (cue.id !== $desk.activeCueId) cancelCorrection()
     setActiveCue(cue.id)
-    cueNote = cue.followupText
     followup = ''
+  }
+  function saveOperator() {
+    setOperator(operatorDraft.trim() || '当班译员')
+    flash('操作人已记录，将写入后续纠正版本。')
+  }
+  /** 从已确认段落发起正文纠正；未确认段落不允许走该流程 */
+  function openCorrection(cue: Cue) {
+    if (cue.status !== 'confirmed') return
+    selectCue(cue)
+    correctionForId = cue.id
+    correctionText = cue.text
+    correctionReason = ''
+  }
+  function cancelCorrection() {
+    correctionForId = null
+    correctionText = ''
+    correctionReason = ''
+  }
+  function submitCorrection() {
+    const cue = $desk.cues.find(item => item.id === correctionForId)
+    if (!cue || !correctionText.trim()) return
+    correctCue(cue.id, correctionText, correctionReason)
+    flash('正稿已替换舞台内容，原稿保留在版本记录中。')
+    cancelCorrection()
+  }
+  function toggleHistory(cue: Cue) {
+    historyOpenIds = historyOpenIds.includes(cue.id) ? historyOpenIds.filter(id => id !== cue.id) : [...historyOpenIds, cue.id]
+  }
+  /** 未确认段落直接编辑，不生成纠正记录 */
+  function startInlineEdit(cue: Cue) {
+    if (cue.status === 'confirmed') return
+    editingId = cue.id
+    editingText = cue.text
+  }
+  function saveInlineEdit() {
+    if (editingId && editingText.trim()) {
+      updateCue(editingId, { text: editingText.trim() })
+      flash('未确认段落已直接更新，不生成纠正记录。')
+    }
+    cancelInlineEdit()
+  }
+  function cancelInlineEdit() {
+    editingId = null
+    editingText = ''
   }
   function confirmActive() {
     if (!activeCue) return
@@ -198,7 +248,7 @@
               {/each}
               {#each $desk.cues.filter(item => item.status === 'confirmed').slice(-2) as cue}
                 <div class="rounded-xl bg-white/10 p-3">
-                  <div class="mb-1 flex justify-between text-[10px] text-teal-200"><span>{speakerName($desk, cue.speakerId)}</span><span>{formatTime(cue.receivedAt)}</span></div>
+                  <div class="mb-1 flex justify-between text-[10px] text-teal-200"><span>{speakerName($desk, cue.speakerId)}{#if cue.corrections.length}<span class="ml-2 rounded bg-teal-500/30 px-1.5 py-0.5 font-black">正稿 · 第 {cue.corrections.length + 1} 版</span>{/if}</span><span>{formatTime(cue.receivedAt)}</span></div>
                   <p class="text-base leading-relaxed lg:text-lg">{cue.text}</p>
                 </div>
               {/each}
@@ -228,6 +278,45 @@
                         {#if cue.manual}<span class="rounded-md bg-slate-100 px-2 py-1 text-slate-600">手工</span>{/if}
                       </div>
                       <p class="text-sm leading-6 lg:text-base">{cue.text}</p>
+                      {#if cue.status === 'confirmed'}
+                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                          {#if cue.corrections.length}
+                            <span class="rounded-md bg-violet-100 px-2 py-1 text-[10px] font-black text-violet-800">已纠正 {cue.corrections.length} 次 · 现显示第 {cue.corrections.length + 1} 版</span>
+                          {/if}
+                          <button class="rounded-md border border-teal-300 px-2 py-1 text-[10px] font-black text-teal-700 hover:bg-teal-50" on:click|stopPropagation={() => openCorrection(cue)}>正文纠正</button>
+                          {#if cue.corrections.length}
+                            <button class="rounded-md border border-slate-300 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-50" aria-expanded={historyOpenIds.includes(cue.id)} on:click|stopPropagation={() => toggleHistory(cue)}>{historyOpenIds.includes(cue.id) ? '收起版本记录' : `版本记录（${cue.corrections.length + 1} 版）`}</button>
+                          {/if}
+                        </div>
+                      {:else}
+                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                          <span class="text-[10px] text-slate-400">未确认段落可直接编辑，不留纠正记录</span>
+                          <button class="rounded-md border border-slate-300 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-50" on:click|stopPropagation={() => startInlineEdit(cue)}>直接编辑</button>
+                        </div>
+                      {/if}
+                      {#if cue.status === 'confirmed' && historyOpenIds.includes(cue.id)}
+                        <div class="mt-2 space-y-2 rounded-xl border border-violet-200 bg-violet-50/70 p-3" role="region" aria-label="版本记录">
+                          <p class="text-[10px] font-black uppercase tracking-wider text-violet-700">版本记录 · 原稿与历次正稿均可逐版查看</p>
+                          {#each cueVersions(cue) as version}
+                            <div class="rounded-lg border p-2 text-xs {version.current ? 'border-violet-400 bg-white shadow-sm' : 'border-slate-200 bg-slate-50'}">
+                              <div class="flex flex-wrap items-center gap-2 text-[10px] font-bold">
+                                <span class="rounded bg-violet-600 px-1.5 py-0.5 text-white">第 {version.version} 版{version.current ? ' · 舞台现显示' : ''}</span>
+                                <span class="text-slate-500">{version.version === 1 ? '原稿' : '正稿'} · {version.operator}</span>
+                                <span class="text-slate-500">{formatTime(version.createdAt)}</span>
+                                {#if version.reason !== '原稿'}<span class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">原因：{version.reason}</span>{/if}
+                              </div>
+                              <p class="mt-1 leading-5 {version.current ? 'font-bold text-slate-900' : 'text-slate-600'}">{version.text}</p>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if editingId === cue.id}
+                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <div class="mt-2" on:click|stopPropagation>
+                          <textarea class="focus-ring w-full rounded-lg border border-slate-300 p-2 text-sm" rows="3" bind:value={editingText} on:keydown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') saveInlineEdit() }}></textarea>
+                          <div class="mt-1 flex gap-2"><button class="rounded-md bg-slate-900 px-3 py-1 text-[10px] font-black text-white" on:click={saveInlineEdit}>保存直接编辑</button><button class="rounded-md border border-slate-300 px-3 py-1 text-[10px] font-bold" on:click={cancelInlineEdit}>取消</button></div>
+                        </div>
+                      {/if}
                       {#if cue.duplicateOf}
                         <div class="mt-2 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
                           <span><strong>疑似重复：</strong>与第 {$desk.cues.findIndex(item => item.id === cue.duplicateOf) + 1} 条高度相似</span>
@@ -251,11 +340,45 @@
               <div class="flex gap-1"><button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="上一条" on:click={() => moveCue(-1)}>↑</button><button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="下一条" on:click={() => moveCue(1)}>↓</button></div>
             </div>
             {#if activeCue}
-              <div class="rounded-xl bg-slate-50 p-3"><p class="text-sm leading-6">{activeCue.text}</p><p class="mt-2 text-[10px] text-slate-500">快捷键：J / K 移动，C 确认，T 发送首条高优先术语提醒</p></div>
-              <div class="mt-3 grid grid-cols-2 gap-2"><Button color="green" on:click={confirmActive}>确认已传 <kbd class="ml-1 text-[10px]">C</kbd></Button><Button color="yellow" on:click={() => tab = 'offline'}>手工补充</Button></div>
-              <label for="followup-input" class="mt-4 block text-[10px] font-black uppercase tracking-wider text-slate-500">遗漏补译</label>
-              <textarea id="followup-input" class="focus-ring mt-2 w-full rounded-xl border p-3 text-sm" rows="3" bind:value={followup} placeholder="输入遗漏内容或修正术语…"></textarea>
-              <Button class="mt-2 w-full" color="light" disabled={!followup.trim()} on:click={saveFollowup}>标记补充完成</Button>
+              <div class="rounded-xl bg-slate-50 p-3">
+                <div class="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <p class="text-sm leading-6">{activeCue.text}</p>
+                  {#if activeCue.corrections.length}<span class="shrink-0 rounded bg-violet-100 px-2 py-0.5 text-[10px] font-black text-violet-800">第 {activeCue.corrections.length + 1} 版</span>{/if}
+                </div>
+                <p class="mt-2 text-[10px] text-slate-500">快捷键：J / K 移动，C 确认，T 发送首条高优先术语提醒</p>
+              </div>
+              <label for="operator-input" class="mt-3 block text-[10px] font-black uppercase tracking-wider text-slate-500">操作人（记入纠正版本）</label>
+              <div class="mt-1 flex gap-2">
+                <input id="operator-input" class="focus-ring min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm" bind:value={operatorDraft} on:keydown={event => event.key === 'Enter' && saveOperator()} />
+                <Button size="sm" color="light" on:click={saveOperator}>记录</Button>
+              </div>
+              {#if activeCue.status === 'confirmed'}
+                {#if correctionForId === activeCue.id}
+                  <div class="mt-3 rounded-xl border border-violet-300 bg-violet-50 p-3">
+                    <p class="text-[10px] font-black uppercase tracking-wider text-violet-700">正文纠正 · 确认后舞台只显示正稿</p>
+                    <label for="correction-text" class="mt-2 block text-[10px] font-bold text-slate-500">正稿</label>
+                    <textarea id="correction-text" class="focus-ring mt-1 w-full rounded-lg border border-violet-200 bg-white p-2 text-sm" rows="3" bind:value={correctionText} placeholder="填写修正后的正稿内容…"></textarea>
+                    <label for="correction-reason" class="mt-2 block text-[10px] font-bold text-slate-500">纠正原因</label>
+                    <textarea id="correction-reason" class="focus-ring mt-1 w-full rounded-lg border border-violet-200 bg-white p-2 text-sm" rows="2" bind:value={correctionReason} placeholder="如：译员口误 / 术语按术语表统一为“韧性”…"></textarea>
+                    <div class="mt-2 grid grid-cols-2 gap-2">
+                      <Button size="sm" color="green" disabled={!correctionText.trim() || correctionText.trim() === activeCue.text} on:click={submitCorrection}>确认正稿上舞台</Button>
+                      <Button size="sm" color="light" on:click={cancelCorrection}>取消</Button>
+                    </div>
+                    <p class="mt-2 text-[10px] text-slate-500">操作人：{$desk.operator} · 原稿与历次正稿保留在版本记录中，可逐版查看。</p>
+                  </div>
+                {:else}
+                  <Button class="mt-3 w-full" color="purple" on:click={() => openCorrection(activeCue)}>发起正文纠正{activeCue.corrections.length ? `（已纠正 ${activeCue.corrections.length} 次）` : ''}</Button>
+                  {#if activeCue.corrections.length}
+                    <Button class="mt-2 w-full" color="light" on:click={() => toggleHistory(activeCue)}>{historyOpenIds.includes(activeCue.id) ? '收起版本记录' : '查看版本记录'}</Button>
+                  {/if}
+                {/if}
+              {/if}
+              <div class="mt-3 grid grid-cols-2 gap-2"><Button color="green" disabled={activeCue.status === 'confirmed'} on:click={confirmActive}>确认已传 <kbd class="ml-1 text-[10px]">C</kbd></Button><Button color="yellow" on:click={() => tab = 'offline'}>手工补充</Button></div>
+              {#if activeCue.status !== 'confirmed'}
+                <label for="followup-input" class="mt-4 block text-[10px] font-black uppercase tracking-wider text-slate-500">遗漏补译</label>
+                <textarea id="followup-input" class="focus-ring mt-2 w-full rounded-xl border p-3 text-sm" rows="3" bind:value={followup} placeholder="输入遗漏内容或修正术语…"></textarea>
+                <Button class="mt-2 w-full" color="light" disabled={!followup.trim()} on:click={saveFollowup}>标记补充完成</Button>
+              {/if}
             {/if}
           </section>
 
